@@ -4,13 +4,15 @@
 from pathlib import Path
 import json, uuid, socket, shlex, subprocess, telegram.error
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+# ✨ کتابخانه کمکی تلگرام برای خنثی‌سازی Markdown اضافه شد
+from telegram.helpers import escape_markdown
 from telegram.ext import (
     Application, CommandHandler, CallbackContext, CallbackQueryHandler
 )
 
 # --- Constants and Settings ---
 TOKEN = "7654851929:AAFgrDaS5JNiaXxIaQnWoQQB8hpeX4uhjNM"
-ADMIN_IDS = {71228850, 7120884460}
+ADMIN_IDS = {71228850}
 SERVER_IP, BASE_PORT, DOCKER_IMG = "185.110.188.25", 20002, "v2fly/v2fly-core"
 CONFIG_DIR = Path("/root/vless_configs"); CONFIG_DIR.mkdir(exist_ok=True)
 HOST_HEADER, HEADER_TYPE, SECURITY, ENCRYPTION, NETWORK = "telewebion.com", "http", "", "none", "tcp"
@@ -108,13 +110,19 @@ async def cb_create(update:Update,ctx:CallbackContext):
         except telegram.error.BadRequest: pass
         return
 
-    # از آنجایی که ممکن است کانفیگ‌ها حذف شوند، برای پیدا کردن شماره بعدی،
-    # به جای idx=len(lines)+1 از یک روش مطمئن‌تر استفاده می‌کنیم.
-    existing_indices = {int(line.split(',')[1].replace('vless', '')) for line in lines if line.split(',')[1].startswith('vless')}
+    existing_indices = set()
+    for line in lines:
+        try:
+            name_part = line.split(',')[1]
+            if name_part.startswith('vless'):
+                existing_indices.add(int(name_part.replace('vless', '')))
+        except (IndexError, ValueError):
+            continue
+
     idx = 1
     while idx in existing_indices:
         idx += 1
-    name=f"vless{idx}"
+    name = f"vless{idx}"
     
     port=free_port(BASE_PORT+idx)
     uid,cfg=make_json(name,port); run_container(name,cfg,port)
@@ -140,20 +148,32 @@ async def cb_create(update:Update,ctx:CallbackContext):
     )
     await update.callback_query.message.reply_text(subscription_info, parse_mode="Markdown")
 
-    # ارسال پیام به تمام ادمین‌ها بدون هیچ شرطی
-    user_info = f"نام: {user.first_name}"
-    if user.last_name: user_info += f" {user.last_name}"
-    if user.username: user_info += f" | یوزرنیم: @{user.username}"
-    
+    # --- بخش ارسال پیام به ادمین ---
+    first_name = user.first_name or ""
+    last_name = user.last_name or ""
+    user_info = f"نام: {first_name} {last_name}".strip()
+    if user.username:
+        user_info += f" | یوزرنیم: @{user.username}"
+    else:
+        user_info += " (یوزرنیم ندارد)"
+
+    # ✨✨✨ اصلاحیه نهایی و قطعی ✨✨✨
+    # کاراکترهای خاص در اطلاعات کاربر و نام کانفیگ را خنثی می‌کنیم
+    safe_user_info = escape_markdown(user_info, version=2)
+    safe_name = escape_markdown(name, version=2)
+    safe_user_id = escape_markdown(str(user.id), version=2)
+
     admin_message = (
-        f"✅ **کانفیگ جدید ساخته شد**\n\n"
-        f"👤 **توسط کاربر:**\n{user_info}\n"
-        f"آیدی عددی: `{user.id}`\n\n"
-        f"🔗 **لینک کانفیگ ({name}):**\n```\n{link}\n```"
+        f"✅ *کانفیگ جدید ساخته شد*\n\n"
+        f"👤 *توسط کاربر:*\n{safe_user_info}\n"
+        f"آیدی عددی: `{safe_user_id}`\n"
+        f"🔗 *کانفیگ \\({safe_name}\\):*"
     )
     for admin_id in ADMIN_IDS:
         try:
-            await ctx.bot.send_message(chat_id=admin_id, text=admin_message, parse_mode="Markdown")
+            # از نسخه ۲ Markdown برای سازگاری با کاراکترهای خنثی‌شده استفاده می‌کنیم
+            await ctx.bot.send_message(chat_id=admin_id, text=admin_message, parse_mode="MarkdownV2")
+            await ctx.bot.send_message(chat_id=admin_id, text=link) 
         except telegram.error.TelegramError as e:
             print(f"ارسال پیام به ادمین {admin_id} با خطا مواجه شد: {e}")
 
