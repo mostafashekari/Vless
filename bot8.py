@@ -4,7 +4,6 @@
 from pathlib import Path
 import json, uuid, socket, shlex, subprocess, telegram.error
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-# ✨ کتابخانه کمکی تلگرام برای خنثی‌سازی Markdown اضافه شد
 from telegram.helpers import escape_markdown
 from telegram.ext import (
     Application, CommandHandler, CallbackContext, CallbackQueryHandler
@@ -126,7 +125,13 @@ async def cb_create(update:Update,ctx:CallbackContext):
     
     port=free_port(BASE_PORT+idx)
     uid,cfg=make_json(name,port); run_container(name,cfg,port)
-    STATUS_FILE.write_text("\n".join(lines+[f"{uid_tg},{name},{port}"]))
+    
+    # ✨ قابلیت جدید: ذخیره نام و یوزرنیم کاربر در فایل وضعیت
+    first_name = (user.first_name or "").replace(",", "") # حذف کاما برای جلوگیری از خرابی فایل
+    username = user.username or ""
+    new_line = f"{uid_tg},{name},{port},{first_name},{username}"
+    STATUS_FILE.write_text("\n".join(lines + [new_line]))
+
     link=vless_link(uid,port,name)
     try: await update.callback_query.answer("کانفیگ ساخته شد!",show_alert=False)
     except telegram.error.BadRequest: pass
@@ -148,17 +153,10 @@ async def cb_create(update:Update,ctx:CallbackContext):
     )
     await update.callback_query.message.reply_text(subscription_info, parse_mode="Markdown")
 
-    # --- بخش ارسال پیام به ادمین ---
-    first_name = user.first_name or ""
-    last_name = user.last_name or ""
-    user_info = f"نام: {first_name} {last_name}".strip()
-    if user.username:
-        user_info += f" | یوزرنیم: @{user.username}"
-    else:
-        user_info += " (یوزرنیم ندارد)"
-
-    # ✨✨✨ اصلاحیه نهایی و قطعی ✨✨✨
-    # کاراکترهای خاص در اطلاعات کاربر و نام کانفیگ را خنثی می‌کنیم
+    user_info = f"نام: {first_name}"
+    if username:
+        user_info += f" | یوزرنیم: @{username}"
+    
     safe_user_info = escape_markdown(user_info, version=2)
     safe_name = escape_markdown(name, version=2)
     safe_user_id = escape_markdown(str(user.id), version=2)
@@ -171,7 +169,6 @@ async def cb_create(update:Update,ctx:CallbackContext):
     )
     for admin_id in ADMIN_IDS:
         try:
-            # از نسخه ۲ Markdown برای سازگاری با کاراکترهای خنثی‌شده استفاده می‌کنیم
             await ctx.bot.send_message(chat_id=admin_id, text=admin_message, parse_mode="MarkdownV2")
             await ctx.bot.send_message(chat_id=admin_id, text=link) 
         except telegram.error.TelegramError as e:
@@ -190,9 +187,9 @@ async def cb_myconfig(update: Update, ctx: CallbackContext):
 
     for line in lines:
         parts = line.split(',')
-        if len(parts) != 3: continue
+        if len(parts) < 3: continue
         
-        line_user_id, name, port = parts
+        line_user_id, name, port = parts[0], parts[1], parts[2]
         
         if is_admin:
             user_configs.append({'name': name, 'port': port})
@@ -227,13 +224,33 @@ async def cb_showlist(update:Update,ctx:CallbackContext):
         try: await update.callback_query.answer("شما اجازه دسترسی ندارید.",show_alert=True)
         except telegram.error.BadRequest: pass; return
     
-    conts=list_containers()
-    
+    # ✨ قابلیت جدید: خواندن اطلاعات کاربران برای نمایش در لیست
+    user_map = {}
+    if STATUS_FILE.exists():
+        for line in STATUS_FILE.read_text().splitlines():
+            parts = line.split(',')
+            if len(parts) >= 2:
+                name = parts[1]
+                # سازگاری با فرمت قدیمی و جدید
+                if len(parts) >= 5:
+                    first_name = parts[3]
+                    username = f"(@{parts[4]})" if parts[4] else ""
+                    user_map[name] = f"{first_name} {username}".strip()
+                else:
+                    user_map[name] = "کاربر نامشخص"
+
+    conts = list_containers()
     up_count = sum(1 for c in conts if c['state'] == 'Up')
     total_count = len(conts)
     header = f"📊 **وضعیت کانتینرها**\nتعداد کل: {total_count} | تعداد فعال (Up): {up_count}\n\n"
     
-    list_text="\n".join(f"◾️ `{c['name']}` | پورت {c['port']} | وضعیت: **{c['state']}**" for c in conts) or "هیچ کانتینری یافت نشد."
+    list_items = []
+    for c in conts:
+        # ✨ نمایش اطلاعات کاربر در کنار مشخصات کانفیگ
+        user_display = user_map.get(c['name'], "کاربر نامشخص")
+        list_items.append(f"◾️ `{c['name']}` | **{c['state']}**\n    👤 {user_display}")
+
+    list_text = "\n".join(list_items) or "هیچ کانتینری یافت نشد."
     
     await update.callback_query.message.reply_text(header + list_text, parse_mode="Markdown", reply_markup=kb_list(conts))
 
@@ -257,23 +274,15 @@ async def cb_action(update:Update,ctx:CallbackContext):
             lines_to_keep = []
             for line in lines:
                 parts = line.split(',')
-                if len(parts) == 3 and parts[1] == name:
+                # سازگاری با فرمت‌های مختلف فایل وضعیت
+                if len(parts) >= 2 and parts[1] == name:
                     continue
                 lines_to_keep.append(line)
             STATUS_FILE.write_text("\n".join(lines_to_keep))
 
-    conts=list_containers()
-    up_count = sum(1 for c in conts if c['state'] == 'Up')
-    total_count = len(conts)
-    header = f"📊 **وضعیت کانتینرها**\nتعداد کل: {total_count} | تعداد فعال (Up): {up_count}\n\n"
-    list_text="\n".join(f"◾️ `{c['name']}` | پورت {c['port']} | وضعیت: **{c['state']}**" for c in conts) or "هیچ کانتینری باقی نمانده."
-    
-    kb=kb_list(conts) if conts else None
-    try:
-        await update.callback_query.edit_message_text(header + list_text, parse_mode="Markdown", reply_markup=kb)
-    except telegram.error.BadRequest as e:
-        if 'Message is not modified' not in str(e):
-             await update.callback_query.answer("عملیات انجام شد. لیست بروز است.")
+    # After action, refresh the list
+    await cb_showlist(update, ctx)
+    await update.callback_query.answer(f"عملیات {act} برای {name} انجام شد.")
 
 
 async def cb_ack(update:Update,ctx:CallbackContext):
